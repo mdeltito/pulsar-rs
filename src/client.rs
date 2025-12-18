@@ -200,7 +200,10 @@ impl<Exe: Executor> Pulsar<Exe> {
 
         // set up a regular connection check
         let weak_manager = Arc::downgrade(&manager);
-        let mut interval = executor.interval(std::time::Duration::from_secs(60));
+
+        // mdeltito: force `check_connections` to be called every second to trigger
+        // race conditions more easily
+        let mut interval = executor.interval(std::time::Duration::from_secs(1));
         let res = executor.spawn(Box::pin(async move {
             while let Some(()) = interval.next().await {
                 if let Some(strong_manager) = weak_manager.upgrade() {

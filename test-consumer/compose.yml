@@ -1,0 +1,144 @@
+services:
+  zookeeper:
+    image: apachepulsar/pulsar:4.0.7
+    container_name: zookeeper
+    restart: on-failure
+    volumes:
+      - zookeeper:/pulsar/data
+    environment:
+      - metadataStoreUrl=zk:zookeeper:2181
+    command:
+      - bash
+      - -c
+      - |
+        mkdir -p /pulsar/data/zookeeper && \
+        chown pulsar /pulsar/data/zookeeper && \
+        bin/apply-config-from-env.py conf/zookeeper.conf && \
+        bin/generate-zookeeper-config.sh conf/zookeeper.conf && \
+        exec bin/pulsar zookeeper
+    healthcheck:
+      test: ["CMD", "bin/pulsar-zookeeper-ruok.sh"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+
+  # Init cluster metadata
+  pulsar-init:
+    container_name: pulsar-init
+    hostname: pulsar-init
+    image: apachepulsar/pulsar:4.0.7
+    command:
+      - bash
+      - -c
+      - |
+        bin/pulsar initialize-cluster-metadata \
+        --cluster local \
+        --zookeeper zookeeper:2181 \
+        --configuration-store zookeeper:2181 \
+        --web-service-url http://broker1:8080 \
+        --broker-service-url pulsar://broker1:6650
+    depends_on:
+      zookeeper:
+        condition: service_healthy
+
+  bookie:
+    image: apachepulsar/pulsar:4.0.7
+    container_name: bookie
+    restart: on-failure
+    volumes:
+      - bookkeeper:/pulsar/data
+    environment:
+      - clusterName=local
+      - zkServers=zookeeper:2181
+      - metadataServiceUri=metadata-store:zk:zookeeper:2181
+      - advertisedAddress=bookie
+      - bookiePort=3181
+    depends_on:
+      zookeeper:
+        condition: service_healthy
+      pulsar-init:
+        condition: service_completed_successfully
+    command:
+      - bash
+      - -c
+      - |
+        mkdir -p /pulsar/data/bookkeeper && \
+        chown pulsar /pulsar/data/bookkeeper && \
+        bin/apply-config-from-env.py conf/bookkeeper.conf && exec bin/pulsar bookie
+
+  broker1:
+    image: apachepulsar/pulsar:4.0.7
+    container_name: broker1
+    hostname: broker1
+    restart: on-failure
+    environment:
+      - metadataStoreUrl=zk:zookeeper:2181
+      - zookeeperServers=zookeeper:2181
+      - clusterName=local
+      - managedLedgerDefaultEnsembleSize=1
+      - managedLedgerDefaultWriteQuorum=1
+      - managedLedgerDefaultAckQuorum=1
+      - advertisedAddress=broker1
+      - advertisedListeners=internal:pulsar://broker1:6650,external:pulsar://localhost:6651
+      - brokerServicePort=6650
+      - webServicePort=8080
+      - maxMessageSize=3145728
+      - nettyMaxFrameSizeBytes=3145728
+    depends_on:
+      zookeeper:
+        condition: service_healthy
+      bookie:
+        condition: service_started
+    ports:
+      - "6651:6650"
+    command: bash -c "bin/apply-config-from-env.py conf/broker.conf && exec bin/pulsar broker"
+
+  pulsar-proxy:
+    image: apachepulsar/pulsar:4.0.7
+    container_name: pulsar-proxy
+    restart: on-failure
+    environment:
+      - metadataStoreUrl=zk:zookeeper:2181
+      - zookeeperServers=zookeeper:2181
+      - configurationMetadataStoreUrl=zk:zookeeper:2181
+      - clusterName=local
+      - servicePort=6650
+      - webServicePort=8080
+    command: bash -c "bin/apply-config-from-env.py conf/proxy.conf && exec bin/pulsar proxy"
+    depends_on:
+      - broker1
+    ports:
+      - "6650:6650"
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/metrics"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+
+
+  tenant-namespace-init:
+    image: apachepulsar/pulsar:4.0.7
+    container_name: tenant-namespace-init
+    command:
+      - bash
+      - -c
+      - |
+        echo 'Starting Pulsar tenant/namespace initialization...' &&
+        bin/pulsar-admin --admin-url http://pulsar-proxy:8080 tenants create platform &&
+        sleep 1 && echo 'Tenant created' &&
+        bin/pulsar-admin --admin-url http://pulsar-proxy:8080 namespaces create platform/pipeline &&
+        sleep 1 && echo 'Namespace created' &&
+        bin/pulsar-admin --admin-url http://pulsar-proxy:8080 topics create-partitioned-topic persistent://platform/pipeline/test --partitions 3 &&
+        echo 'Pulsar tenant/namespace initialization completed successfully!'
+    depends_on:
+      zookeeper:
+        condition: service_healthy
+      pulsar-init:
+        condition: service_completed_successfully
+      pulsar-proxy:
+        condition: service_healthy
+
+volumes:
+  zookeeper:
+  bookkeeper:

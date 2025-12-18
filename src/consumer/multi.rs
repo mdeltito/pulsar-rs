@@ -143,6 +143,7 @@ impl<T: DeserializeMessage, Exe: Executor> MultiTopicConsumer<T, Exe> {
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn update_topics(&mut self) {
+        info!("updating topics for MultiTopicConsumer");
         let existing_topics = self.existing_topics.clone();
         let consumer_config = self.config.clone();
         let pulsar = self.pulsar.clone();
@@ -156,6 +157,9 @@ impl<T: DeserializeMessage, Exe: Executor> MultiTopicConsumer<T, Exe> {
         self.new_consumers = Some(Box::pin(async move {
             // 1.2 append topics which match `topic_regex`
             if let Some(regex) = topic_regex {
+                // mdeltito: when `check_connections` has dropped the base connection,
+                // this ends up being the call that recreates it. you can see this in the
+                // logs where each refresh cycle finds no valid connection.
                 let all_topics = pulsar
                     .get_topics_of_namespace(
                         namespace.clone(),
@@ -169,7 +173,7 @@ impl<T: DeserializeMessage, Exe: Executor> MultiTopicConsumer<T, Exe> {
                     .filter(|t| regex.is_match(t))
                     .collect();
 
-                trace!("matched topics {:?} (regex: {})", matched_topics, &regex);
+                debug!("matched topics {:?} (regex: {})", matched_topics, &regex);
 
                 topics.append(&mut matched_topics);
             }
@@ -194,7 +198,7 @@ impl<T: DeserializeMessage, Exe: Executor> MultiTopicConsumer<T, Exe> {
                     }),
             )
             .await?;
-            trace!("created {} consumers", consumers.len());
+            info!("created {} consumers", consumers.len());
             Ok(consumers)
         }));
     }

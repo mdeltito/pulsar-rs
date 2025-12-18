@@ -1,3 +1,6 @@
+[workspace]
+members = [".", "test-consumer"]
+
 [package]
 name = "pulsar"
 version = "6.4.1"

@@ -277,19 +277,29 @@ impl<Exe: Executor> ConnectionManager<Exe> {
         &self,
         broker: &BrokerAddress,
     ) -> Result<Arc<Connection<Exe>>, ConnectionError> {
+        debug!("Looking for connection to {}...", broker.url);
         let rx = {
             let mut conns = self.connections.lock().await;
             match conns.get_mut(broker) {
-                None => None,
+                None => {
+                    debug!("[] no connection for {}", broker.url);
+                    None
+                }
                 Some(ConnectionStatus::Connected(conn)) => {
                     if conn.is_valid() {
+                        debug!("[connected] returning valid connection for {}", broker.url);
                         return Ok(conn.clone());
                     } else {
+                        warn!("[connected] invalid connection for {}", broker.url);
                         None
                     }
                 }
                 Some(ConnectionStatus::Connecting(ref mut v)) => {
                     let (tx, rx) = oneshot::channel();
+                    debug!(
+                        "[connecting...] existing pending connection to {}",
+                        broker.url
+                    );
                     v.push(tx);
                     Some(rx)
                 }
@@ -297,9 +307,15 @@ impl<Exe: Executor> ConnectionManager<Exe> {
         };
 
         match rx {
-            None => self.connect(broker.clone()).await,
+            None => {
+                info!("No existing connection, creating new for {}", broker.url);
+                self.connect(broker.clone()).await
+            }
             Some(rx) => match rx.await {
-                Ok(res) => res,
+                Ok(res) => {
+                    debug!("Connection found for {}", broker.url);
+                    res
+                }
                 Err(_) => Err(ConnectionError::Canceled),
             },
         }
@@ -310,8 +326,6 @@ impl<Exe: Executor> ConnectionManager<Exe> {
         &self,
         broker: &BrokerAddress,
     ) -> Result<Arc<Connection<Exe>>, ConnectionError> {
-        debug!("ConnectionManager::connect({:?})", broker);
-
         let rx = {
             match self
                 .connections
@@ -474,7 +488,7 @@ impl<Exe: Executor> ConnectionManager<Exe> {
                 }
                 if let Some(strong_conn) = weak_conn.upgrade() {
                     if !strong_conn.is_valid() {
-                        trace!(
+                        debug!(
                             "connection {} is not valid anymore, skip heart beat task",
                             connection_id
                         );
@@ -489,7 +503,9 @@ impl<Exe: Executor> ConnectionManager<Exe> {
                 } else {
                     // if the strong pointers were dropped, we can stop the heartbeat for this
                     // connection
-                    trace!("strong connection was dropped, stopping keepalive task");
+
+                    // mdeltito: changed from info to be more visible in logs
+                    error!("strong connection was dropped, stopping keepalive task");
                     break;
                 }
             }
@@ -515,7 +531,7 @@ impl<Exe: Executor> ConnectionManager<Exe> {
                 info!("removing old connection");
             }
             None => {
-                //info!("setting up new connection");
+                info!("setting up new connection");
             }
         };
 
@@ -525,12 +541,15 @@ impl<Exe: Executor> ConnectionManager<Exe> {
     /// tests that all connections are valid and still used
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub(crate) async fn check_connections(&self) {
-        trace!("cleaning invalid or unused connections");
+        info!("cleaning invalid or unused connections");
         self.connections
             .lock()
             .await
             .retain(|_, ref mut connection| match connection {
-                ConnectionStatus::Connecting(_) => true,
+                ConnectionStatus::Connecting(_) => {
+                    debug!("Retaining connection in `Connecting` state");
+                    true
+                }
                 ConnectionStatus::Connected(conn) => {
                     // if the manager holds the only reference to that
                     // connection, we can remove it from the manager
@@ -546,6 +565,10 @@ impl<Exe: Executor> ConnectionManager<Exe> {
                         strong_count
                     );
 
+                    // mdeltito: removing the `strong_count` condition retains the
+                    // base connection instead of preemptively cleaning it up,
+                    // which allows it to be reused when `get_topics_of_namespace()`
+                    // fetches a connection via `get_base_connection()`
                     conn.is_valid() && strong_count > 1
                 }
             });
